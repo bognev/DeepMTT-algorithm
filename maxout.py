@@ -35,8 +35,10 @@ def max_out(inputs, num_units, axis=None):
                          'a multiple of num_units({})'.format(num_channels, num_units))
     shape[axis] = num_units
     shape += [num_channels // num_units]
-    outputs = tf.reduce_max(tf.reshape(inputs, shape), -1, keep_dims=False)
+    outputs = tf.reduce_max(tf.reshape(inputs, shape), -1, keepdims=False)
     return outputs
+
+
 
 
 if __name__ == '__main__':

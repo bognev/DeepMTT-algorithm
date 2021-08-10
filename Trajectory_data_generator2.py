@@ -34,7 +34,7 @@ TR_min = -10
 TR_intv = 0.1
 
 #Trajectory generator
-def trajectory_creat(data_len, T_matrix):
+def trajectory_create(data_len, T_matrix):
     #Transition noise（Acceleration noise m/s^2）
     state_n = rd.uniform(8.0,13.0)
     s_var = np.square(state_n)
@@ -46,13 +46,13 @@ def trajectory_creat(data_len, T_matrix):
     chol_var = cholesky(var_m)
     
     
-    data = np.array([[0 for i in range(4)] for j in range(data_len)],'float64')
+    data = np.zeros((data_len, 4))
     Dist_change = Velo_max * sT * data_len
     #Starting point
     sp_distance = rd.uniform(Dist_min + Dist_change, Dist_max - Dist_change)
     sp_direction = (rd.random()-0.5) * 2 * np.pi
-    d_x = sp_distance * np.cos(sp_direction)   #Target X dirction position
-    d_y = sp_distance * np.sin(sp_direction)   #Target Y dirction position
+    d_x = sp_distance * np.cos(sp_direction)   #Target X direction position
+    d_y = sp_distance * np.sin(sp_direction)   #Target Y direction position
     
 #    d_x = -500
 #    d_y = 200
@@ -63,8 +63,8 @@ def trajectory_creat(data_len, T_matrix):
 #    sp_velocity = 200
 #    vel_direction = -np.pi/4
     
-    v_x = sp_velocity * np.cos(vel_direction)  #Target X dirction velocity
-    v_y = sp_velocity * np.sin(vel_direction)  #Target Y dirction velocity
+    v_x = sp_velocity * np.cos(vel_direction)  #Target X direction velocity
+    v_y = sp_velocity * np.sin(vel_direction)  #Target Y direction velocity
     
     X_a = np.array([[d_x, d_y, v_x, v_y]],'float64')
     for i in range(data_len):
@@ -75,9 +75,9 @@ def trajectory_creat(data_len, T_matrix):
 
 def trajectory_batch_generator(batch_size, data_len):
     #Initialization
-    Traj_r = np.array([[[0 for i in range(4)] for j in range(data_len)] for k in range(batch_size)],'float64')    #Initialization of trajectory
-    Obser = np.array([[[0 for i in range(2)] for j in range(data_len)] for k in range(batch_size)],'float64') #Initialization of observation
-    Tran_m = np.array([[[0 for i in range(4)] for j in range(4)] for k in range(batch_size)],'float64')
+    gt = np.zeros((batch_size, data_len, 4))
+    obs = np.zeros((batch_size, data_len, 2))
+    transition_matrix =np.zeros((batch_size, 4, 4))
     for i in range(batch_size):
         
         turn_rate = rd.randint(TR_min/TR_intv,TR_max/TR_intv)*TR_intv
@@ -91,27 +91,28 @@ def trajectory_batch_generator(batch_size, data_len):
                             [0,0,np.sin(w*sT),np.cos(w*sT)]])
     
         F_c = np.transpose(F_c,[1,0])
-        dt, dtn = trajectory_creat(data_len, F_c)
-        Traj_r[i]= dt
+        dt, dtn = trajectory_create(data_len, F_c)
+        gt[i]= dt
         
-        #Observations
+        #observations
         #observation noise
         dis_n = rd.uniform(8.0,13.0)  #Distance noise
         dis_var = np.square(dis_n)
         azi_n = rd.uniform(7.0,9.0)     #Azimuth noise
         azi_var = np.square(azi_n/1000)
 
-        Obser[i,:,0] = np.arctan2(dtn[:,1],dtn[:,0]) + np.random.normal(0,azi_var,data_len) #Azimuth
-        Obser[i,:,1] = np.sqrt(np.square(dtn[:,0])+np.square(dtn[:,1])) + np.random.normal(0,dis_var,data_len)   #Distance
-        Tran_m[i,:,:] = F_c
-    return Traj_r, Obser, Tran_m
+        obs[i,:,0] = np.arctan2(dtn[:,1],dtn[:,0]) + np.random.normal(0,azi_var,data_len) #Azimuth
+        obs[i,:,1] = np.sqrt(np.square(dtn[:,0])+np.square(dtn[:,1])) + np.random.normal(0,dis_var,data_len)   #Distance
+        transition_matrix[i,:,:] = F_c
+    return gt, obs, transition_matrix
+
 
 def trajectory_batch_generator2(batch_size, data_len):
     #Initialization
     #observaiton noise in X Y direction
-    Traj_r = np.array([[[0 for i in range(4)] for j in range(data_len)] for k in range(batch_size)],'float64')    #Initialization of trajectory
-    Obser = np.array([[[0 for i in range(2)] for j in range(data_len)] for k in range(batch_size)],'float64') #Initialization of observation
-    Tran_m = np.array([[[0 for i in range(4)] for j in range(4)] for k in range(batch_size)],'float64')
+    gt = np.zeros((batch_size, data_len, 4))
+    obs = np.zeros((batch_size, data_len, 2))
+    transition_matrix = np.zeros((batch_size, 4, 4))
     for i in range(batch_size):
         
         turn_rate = rd.randint(TR_min/TR_intv,TR_max/TR_intv)*TR_intv
@@ -125,10 +126,10 @@ def trajectory_batch_generator2(batch_size, data_len):
                             [0,0,np.sin(w*sT),np.cos(w*sT)]])
     
         F_c = np.transpose(F_c,[1,0])
-        dt, dtn = trajectory_creat(data_len, F_c)
-        Traj_r[i]= dt
+        dt, dtn = trajectory_create(data_len, F_c)
+        gt[i]= dt
         
-        #Observations
+        #observations
         #observation noise in X Y direction
         X_n = rd.uniform(10.0,50.0)  #X direction noise
         X_var = np.square(X_n)
@@ -139,10 +140,10 @@ def trajectory_batch_generator2(batch_size, data_len):
         dtn[:,1] = dtn[:,1] + np.random.normal(0,Y_var,data_len)
         
 
-        Obser[i,:,0] = np.arctan2(dtn[:,1],dtn[:,0]) #Azimuth
-        Obser[i,:,1] = np.sqrt(np.square(dtn[:,0])+np.square(dtn[:,1]))   #Distance
-        Tran_m[i,:,:] = F_c
-    return Traj_r, Obser, Tran_m
+        obs[i,:,0] = np.arctan2(dtn[:,1],dtn[:,0]) #Azimuth
+        obs[i,:,1] = np.sqrt(np.square(dtn[:,0])+np.square(dtn[:,1]))   #Distance
+        transition_matrix[i,:,:] = F_c
+    return gt, obs, transition_matrix
 
 ##==============================================================================
 ##保存成mat数据

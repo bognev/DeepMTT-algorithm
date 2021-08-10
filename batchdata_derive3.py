@@ -20,10 +20,10 @@ from filterpy.kalman import JulierSigmaPoints as SP
 
 #using the data with small range of distances (60->20)
 from Trajectory_data_generator2 import*
-data_len = 50
+data_len = 64
 #define UKF
 dim_state = 4
-dim_obser = 2
+dim_observation = 2
 #transition noise
 #Sampling time
 sT = 0.1
@@ -40,32 +40,32 @@ dis_var = np.square(dis_n)
 azi_n = 8.0     #azimuth
 azi_var = np.square(azi_n/1000)
 
-#Modefy observations, make them continuous
-def data_refine(Obser):
-    bs,dl,_ = np.shape(Obser)
-    new_obser = np.copy(Obser)
+#Modefy observationvations, make them continuous
+def data_refine(observation):
+    bs,dl,_ = np.shape(observation)
+    new_observation = np.copy(observation)
     for j in range(bs):
         for i in range(dl-1):
-            a = new_obser[j,i,0]
-            b = new_obser[j,i+1,0]
+            a = new_observation[j,i,0]
+            b = new_observation[j,i+1,0]
             c = a-b
             if c > 6:
-                new_obser[j,i+1:,0] = new_obser[j,i+1:,0] + 2*np.pi
+                new_observation[j,i+1:,0] = new_observation[j,i+1:,0] + 2*np.pi
             if c < -6:
-                new_obser[j,i+1:,0] = new_obser[j,i+1:,0] - 2*np.pi
+                new_observation[j,i+1:,0] = new_observation[j,i+1:,0] - 2*np.pi
             
-    return new_obser
+    return new_observation
 
-#Creat batch for training
+#create batch for training
 
 #State transition function
-def my_fx(x, sT):
+def fx(x, sT):
     """ state transition function for sstate [downrange, vel, altitude]"""
     F = np.array([[1,0,sT,0],[0,1,0,sT],[0,0,1,0],[0,0,0,1]],'float64') #F_cv
 
     return np.dot(F, x)
-#Observation function
-def my_hx(x):
+#observationvation function
+def hx(x):
     """ returns slant range = np.array([[0],[0]]) based on downrange distance and altitude"""
     r = np.array([0,0],'float64')
     r[0] = np.arctan2(x[1],x[0])
@@ -73,20 +73,16 @@ def my_hx(x):
     return r
 
 #Batch creating
-def creat_batch3(min_dn,max_dn,pos_noise,vel_noise,BN):
-    batch_size = int(100*BN)
-    my_traj, my_obser, Tran_m = trajectory_batch_generator(batch_size,data_len)
-    Traj_r = my_traj
-    Obser = my_obser
-    
-    Traj_s = np.array([[[0 for i in range(4)] for j in range(data_len)] for k in range(batch_size)],'float64')
-    for i in range(batch_size): 
-        my_SP = SP(dim_state,kappa=0.)
-        my_UKF = UKF(dim_x=dim_state, dim_z=dim_obser, dt=sT, hx=my_hx, fx=my_fx, points=my_SP)
+def create_batch(pos_noise,vel_noise,batch_size,data_len):
+    gt_trajectory, observation, _ = trajectory_batch_generator(batch_size,data_len)
+    ukf_trajectory = np.zeros((batch_size, data_len, 4))
+    for i in range(batch_size):
+        my_SP = SP(dim_state, kappa=0.)
+        my_UKF = UKF(dim_x=dim_state, dim_z=dim_observation, dt=sT, hx=hx, fx=fx, points=my_SP)
         my_UKF.Q *= var_m
         my_UKF.R *= np.array([[azi_var,0],[0,dis_var]])
         x0_noise = np.array([np.random.normal(0,pos_noise,2),np.random.normal(0,vel_noise,2)])
-        my_UKF.x = Traj_r[i,0,:] + np.reshape(x0_noise,[4,])
+        my_UKF.x = gt_trajectory[i,0,:] + np.reshape(x0_noise,[4,])
         my_UKF.P *= 1.
         
         #tracking results of UKF
@@ -94,8 +90,58 @@ def creat_batch3(min_dn,max_dn,pos_noise,vel_noise,BN):
         xs.append(my_UKF.x)
         for j in range(data_len-1):
             my_UKF.predict()
-            my_UKF.update(Obser[i,j+1,:])
+            my_UKF.update(observation[i,j+1,:])
             xs.append(my_UKF.x.copy())    
-        Traj_s[i] = np.asarray(xs)
+        ukf_trajectory[i] = np.asarray(xs)
         
-    return Traj_r, Obser, Traj_s, Traj_r-Traj_s
+    return gt_trajectory, observation, ukf_trajectory, gt_trajectory-ukf_trajectory
+
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from scipy.stats import iqr
+
+def norm_features(gt_trajectory, observation, ukf_trajectory, gt_ukf_residual):
+    median = 16 * iqr(np.abs(gt_ukf_residual), rng=(0, 85), axis=0)  # ,
+    ne = np.abs(gt_ukf_residual) > median
+    ne = ne.any(axis=2)
+    ukf_trajectory[ne] = 0
+    gt_ukf_residual[ne] = 0
+    dist_norm = np.linalg.norm(ukf_trajectory[:, :, 0:2], axis=2)
+    vel_norm = np.linalg.norm(ukf_trajectory[:, :, 2:4], axis=2)
+    acc_norm = np.diff(vel_norm, prepend=0)/0.1
+    dist_diff_norm = np.diff(dist_norm, prepend=0)
+    # ukf_trajectory = np.dstack((ukf_trajectory, dist_norm))
+    # ukf_trajectory = np.dstack((ukf_trajectory, vel_norm))
+    # ukf_trajectory = np.dstack((ukf_trajectory, acc_norm))
+    # ukf_trajectory = np.dstack((ukf_trajectory, dist_diff_norm))
+    # ukf_trajectory = np.dstack((ukf_trajectory, ne.astype(np.int)))
+
+    ukf_trajectory_norm = np.zeros_like(ukf_trajectory)
+    # ukf_trajectory_norm[:, :, 0:2] = ukf_trajectory[:, :, 0:2] / np.linalg.norm(ukf_trajectory[:, :, 0:2])
+    # ukf_trajectory_norm[:, :, 2:4] = ukf_trajectory[:, :, 2:4] / np.linalg.norm(ukf_trajectory[:, :, 2:4])
+    # scaler = MinMaxScaler()  # (feature_range=[-1, 1])
+    # for i in range(4):
+    #     scaler.fit(ukf_trajectory[:,:,i])
+    #     ukf_trajectory_norm[:,:,i] = scaler.transform(ukf_trajectory[:,:,i])
+    for i in range(4):
+        if(i==0 or i==1):
+            weight = Dist_max#np.max(np.abs(ukf_trajectory[:,:,i]))
+        if(i==2 or i==3):
+            weight = Velo_max  # np.max(np.abs(ukf_trajectory[:,:,i]))
+        ukf_trajectory_norm[:,:,i] = ukf_trajectory[:,:,i] / weight
+
+    # for i in range(4):
+    #     weight = np.max(np.abs(gt_ukf_residual[:,:,i]))
+    #     gt_ukf_residual[:,:,i] = gt_ukf_residual[:,:,i] / weight
+
+    return (gt_trajectory, observation, ukf_trajectory, gt_ukf_residual, ukf_trajectory_norm, median)
+
+def make_generator(batch_size, timestep_size, full=0):
+    while True:
+        gt_trajectory, observation, ukf_trajectory, gt_ukf_residual = create_batch(30, 3, batch_size, timestep_size)
+        gt_trajectory, observation, ukf_trajectory, gt_ukf_residual, ukf_trajectory_norm, median = norm_features(gt_trajectory, observation, ukf_trajectory, gt_ukf_residual)
+        if full:
+            yield (gt_trajectory, observation, ukf_trajectory, gt_ukf_residual, ukf_trajectory_norm, median)
+        else:
+            # ukf_trajectory_norm = np.random.random(ukf_trajectory_norm.shape)
+            # gt_ukf_residual = np.random.random(gt_ukf_residual.shape)
+            yield (ukf_trajectory_norm, gt_ukf_residual)

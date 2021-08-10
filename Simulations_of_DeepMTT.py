@@ -14,18 +14,24 @@ Created on Tue May  1 20:56:13 2018
 import numpy as np
 import tensorflow as tf
 from tensorflow.python.ops import variable_scope as vs
-from tensorflow.contrib import rnn
+
 import time
 #from batchdata_derive3 import*
 from maxout import max_out as MO     #maxout activation function
+from tensorflow.keras.utils import get_custom_objects
+from tensorflow.keras.layers import Activation
+from tensorflow.keras import backend as K
 
-def Noisy_af(Xt):                    #noisy activation function
+def noisy_af(Xt):
+    #noisy activation function
     p = 1
     c = 1
     h = tf.nn.relu(0.5*Xt+0.5)-tf.nn.relu(0.5*Xt-0.5) -0.5
 #    h = tf.nn.relu(Xt+1)-tf.nn.relu(Xt-1)-1
-    y = h + c*tf.square(tf.sigmoid(p*(h-Xt))-0.5) * tf.random_normal(tf.shape(Xt),mean=0.0,stddev=1.0,dtype=tf.float32,seed=None,name=None)
+    y = h + c*tf.square(K.sigmoid(p*(h-Xt))-0.5) * tf.random.normal(tf.shape(Xt),mean=0.0,stddev=1.0,dtype=tf.float32,seed=None,name=None)
     return y
+
+get_custom_objects().update({'noisy_af': noisy_af})
 
 def piecewise(Xt):                  #piecewise activation function
 #    y = (tf.nn.relu(0.5*Xt+0.5)-tf.nn.relu(0.5*Xt-0.5)-0.5) #piecewise activation function
@@ -38,7 +44,7 @@ def fir_filter(x,w,b_size,t_size): #快速FIR滤波
         #w,滤波网络,shape为[fir_size, output_size]
 #        shape_x = x.get_shape().as_list()
         shape_w = w.get_shape().as_list()
-        x_add = tf.constant(0, dtype=tf.float32, shape=[b_size,shape_w[0]-1,shape_w[1]], name='X_add')
+        x_add = tf.constant(tf.zeros((b_size[0],shape_w[0]-1,shape_w[1])), dtype=tf.float32, shape=[b_size[0],shape_w[0]-1,shape_w[1]], name='X_add')
         x = tf.concat([x_add,x],1)  #给前面不足长度的待滤波序列补全零
         x = tf.expand_dims(x,2)     #扩展一维，存储待滤波数据
         y = []
@@ -46,7 +52,7 @@ def fir_filter(x,w,b_size,t_size): #快速FIR滤波
             y.append(x[:,i:i+t_size,:,:])
         z = tf.concat(y,2)
         z = z*w
-        return tf.reduce_sum(z,reduction_indices=2)
+        return tf.reduce_sum(z,axis=2)
 
 #数据处理2-----batch里面每一个数据按照第一个值的最大值进行归一化
 def Data_Pro2(data):
@@ -64,14 +70,14 @@ def Data_Pro2(data):
 #lr = 1e-5
 #lr = 1e3
 #处理数据的batch大小
-bs = 1
+bs = 16
 _batch_size = np.array([int(bs)])
 # The size of batch for learning，这是在图里的batch_size张量定义
-batch_size = tf.placeholder(tf.int32,[1])
+batch_size = tf.constant(value=16, dtype=tf.int32)
 # 每个时刻的输入特征是4维的，就是每个时刻输入一行，一行有距离x,y和速度vx,vy
 input_size = 4
 # 时序持续长度
-timestep_size = 50
+timestep_size = 64
 
 ## 隐含层的数量
 #hidden_size = 64
@@ -93,127 +99,150 @@ fir_size = 5
 # 最后输出向量的维度
 output_size = 4
 
+keep_prob = tf.constant(0, dtype=tf.float32)
+
+
 #输入输出定义------------------------------------------------------------------
-with tf.name_scope('inputs'):
-    X = tf.placeholder(tf.float32, [None, timestep_size, input_size], name='input_x')
-    y = tf.placeholder(tf.float32, [None, timestep_size, output_size], name='input_y')
-    Xtrac = tf.placeholder(tf.float32, [None, timestep_size, input_size], name='input_x')
-    myd = tf.placeholder(tf.float32, [None, timestep_size-1, output_size], name='input_y')
-    #定义一层FIR卷积层做滤波
-    Fir_w = tf.Variable(tf.constant(1.0/fir_size,dtype=tf.float32,shape=[fir_size, input_size]), dtype=tf.float32, name='fir_w')
-    tf.summary.histogram('fir_w',Fir_w)
-    X_f = fir_filter(X, Fir_w, _batch_size, timestep_size)
+X = tf.Variable(initial_value=tf.zeros(shape=(batch_size, timestep_size, input_size)), shape=(batch_size, timestep_size, input_size), dtype = tf.float32, name='input_x', trainable=False)
+y = tf.Variable(initial_value=tf.zeros(shape=(batch_size, timestep_size, output_size)), shape=(batch_size, timestep_size, output_size), dtype = tf.float32, name='input_y', trainable=False)
+Xtrac = tf.Variable(initial_value=tf.zeros(shape=(batch_size, timestep_size, input_size)), shape=(batch_size, timestep_size, input_size), dtype=tf.float32, name='input_Xtrac', trainable=False)
+myd = tf.Variable(initial_value=tf.zeros(shape=(batch_size, timestep_size-1, output_size)), shape=(batch_size, timestep_size-1, output_size), dtype=tf.float32, name='input_myd', trainable=False)
+#FIR
+Fir_w = tf.Variable(tf.constant(1.0/fir_size,dtype=tf.float32,shape=[fir_size, input_size]), dtype=tf.float32, name='fir_w')
+tf.summary.histogram('fir_w',Fir_w)
+X_f = fir_filter(X, Fir_w, _batch_size, timestep_size)
+print(X_f.shape)
 
+
+
+from tensorflow.keras.layers import LSTMCell
+from tensorflow.keras.layers import Bidirectional
+from tensorflow.keras.layers import RNN
+from tensorflow.keras.layers import Input
+
+
+class Maxout(tf.keras.layers.Layer):
+    def __init__(self, **kwargs):
+        super(Maxout, self).__init__(**kwargs)
+        self.initializer = tf.keras.initializers.TruncatedNormal(mean=0.0, stddev=0.1, seed=None)
+
+    def build(self, input_shape):
+        self.hidden_size = input_shape[2]
+        self.timestep_size = input_shape[1]
+        self.maxout_w = self.add_weight(shape=(self.hidden_size, timestep_size, self.hidden_size),
+                                        initializer=self.initializer,
+                                        name="maxout_w",
+                                        trainable=True,
+                                        regularizer = tf.keras.regularizers.l2(l2=lambda1))
+        self.maxout_b = self.add_weight(name='maxout_b',
+                                        shape=(timestep_size, self.hidden_size),
+                                        initializer=tf.keras.initializers.Constant(0.1),#, shape=[timestep_size, self.hidden_size]),
+                                        trainable=True)
+
+        self.W = self.add_weight(shape=(maxout_size, timestep_size, output_size),
+                                 initializer=self.initializer,
+                                 name="output_w",
+                                 trainable=True,
+                                 regularizer = tf.keras.regularizers.l2(l2=lambda1))
+        self.b = self.add_weight(name='output_b',
+                                 shape=(timestep_size, output_size),
+                                 initializer=tf.keras.initializers.Constant(0.1),#tf.constant(0.1, shape=[timestep_size, output_size]),
+                                 trainable=True)
+
+
+
+    def call(self, inputs):
+        T_o = tf.transpose(inputs, [1, 0, 2])
+        T_w = tf.transpose(self.maxout_w, [1, 0, 2])
+        maxout_o = tf.transpose(tf.matmul(T_o, T_w), [1, 0, 2]) + self.maxout_b
+        mo_f = MO(maxout_o, maxout_size, axis=2)  # maxout
+
+        tran_o = tf.transpose(mo_f, [1, 0, 2])
+        tran_w = tf.transpose(self.W, [1, 0, 2])
+        y_pre = tf.transpose(tf.matmul(tran_o, tran_w), [1, 0, 2]) + self.b
+
+        lstm_outputs = {'maxout_w': self.maxout_w, 'maxout_b': self.maxout_b, 'output_w': self.W, 'output_b': self.b}  # 把要保存的参数做成字典
+
+        return y_pre
+
+    def get_config(self):
+        # Implement get_config to enable serialization. This is optional.
+        base_config = super(Maxout, self).get_config()
+        config = {"initializer": tf.keras.initializers.serialize(self.initializer)}
+        return dict(list(base_config.items()) + list(config.items()))
+
+from tensorflow_addons.layers import Maxout as Maxout_layer
 #构建lstm网络，多层分开--------------------------------------------------------
-with tf.variable_scope('lstm') as lstm_net:
-    keep_prob = tf.placeholder(tf.float32)
-    #第一层：
-    with vs.variable_scope("lstm_cell1_fw") as lstm_cell1_fw:
-    #forward:
-        lstm_cell_1_fw = rnn.BasicLSTMCell(num_units=hidden_size_1, forget_bias=1.0, state_is_tuple=True, activation=Noisy_af)
-        lstm_cell_1_fw = rnn.DropoutWrapper(cell=lstm_cell_1_fw, input_keep_prob=1.0, output_keep_prob=keep_prob)
-        init_state_1_fw = lstm_cell_1_fw.zero_state(batch_size, dtype=tf.float32)
-        outputs_l1_fw, _ = tf.nn.dynamic_rnn(lstm_cell_1_fw, inputs=X_f, initial_state=init_state_1_fw, time_major=False, scope=lstm_cell1_fw)
-    with vs.variable_scope("lstm_cell1_bw") as lstm_cell1_bw:    
-    #backward:
-        lstm_cell_1_bw = rnn.BasicLSTMCell(num_units=hidden_size_1, forget_bias=1.0, state_is_tuple=True, activation=Noisy_af)
-        lstm_cell_1_bw = rnn.DropoutWrapper(cell=lstm_cell_1_bw, input_keep_prob=1.0, output_keep_prob=keep_prob)
-        init_state_1_bw = lstm_cell_1_bw.zero_state(batch_size, dtype=tf.float32)
-        outputs_l1_bw, _ = tf.nn.dynamic_rnn(lstm_cell_1_bw, inputs=tf.reverse(X_f,[1]), initial_state=init_state_1_bw, time_major=False, scope=lstm_cell1_bw)
-    #output:
-    outputs_l1_bw = tf.reverse(outputs_l1_bw,[1])
-    outputs_l1 = tf.concat([outputs_l1_fw,outputs_l1_bw],2)
-    tf.summary.histogram('lstm1_outputs', outputs_l1)
-    #第二层：
-    with vs.variable_scope("lstm_cell2_fw") as lstm_cell2_fw:
-    #forward:
-        lstm_cell_2_fw = rnn.BasicLSTMCell(num_units=hidden_size_2, forget_bias=1.0, state_is_tuple=True, activation=Noisy_af)
-        lstm_cell_2_fw = rnn.DropoutWrapper(cell=lstm_cell_2_fw, input_keep_prob=1.0, output_keep_prob=keep_prob)
-        init_state_2_fw = lstm_cell_2_fw.zero_state(batch_size, dtype=tf.float32)
-        outputs_l2_fw, _ = tf.nn.dynamic_rnn(lstm_cell_2_fw, inputs=outputs_l1, initial_state=init_state_2_fw, time_major=False, scope=lstm_cell2_fw)
-    with vs.variable_scope("lstm_cell2_bw") as lstm_cell2_bw:
-    #backward:
-        lstm_cell_2_bw = rnn.BasicLSTMCell(num_units=hidden_size_2, forget_bias=1.0, state_is_tuple=True, activation=Noisy_af)
-        lstm_cell_2_bw = rnn.DropoutWrapper(cell=lstm_cell_2_bw, input_keep_prob=1.0, output_keep_prob=keep_prob)
-        init_state_2_bw = lstm_cell_2_bw.zero_state(batch_size, dtype=tf.float32)
-        outputs_l2_bw, _ = tf.nn.dynamic_rnn(lstm_cell_2_bw, inputs=tf.reverse(outputs_l1,[1]), initial_state=init_state_2_bw, time_major=False, scope=lstm_cell2_bw)
-    #output:
-    outputs_l2_bw = tf.reverse(outputs_l2_bw,[1])
-    outputs_l2 = tf.concat([outputs_l2_fw,outputs_l2_bw],2)
-    tf.summary.histogram('lstm2_outputs', outputs_l2)
-    #第三层：
-    with vs.variable_scope("lstm_cell3_fw") as lstm_cell3_fw:
-    #forward:
-        lstm_cell_3_fw = rnn.BasicLSTMCell(num_units=hidden_size_3, forget_bias=1.0, state_is_tuple=True)
-#        lstm_cell_3_fw = rnn.DropoutWrapper(cell=lstm_cell_3_fw, input_keep_prob=1.0, output_keep_prob=keep_prob)
-        init_state_3_fw = lstm_cell_3_fw.zero_state(batch_size, dtype=tf.float32)
-        outputs_l3_fw, _ = tf.nn.dynamic_rnn(lstm_cell_3_fw, inputs=outputs_l2, initial_state=init_state_3_fw, time_major=False, scope=lstm_cell3_fw)
-    with vs.variable_scope("lstm_cell3_bw") as lstm_cell3_bw:
-        #backward:
-        lstm_cell_3_bw = rnn.BasicLSTMCell(num_units=hidden_size_3, forget_bias=1.0, state_is_tuple=True)
-#        lstm_cell_3_bw = rnn.DropoutWrapper(cell=lstm_cell_3_bw, input_keep_prob=1.0, output_keep_prob=keep_prob)
-        init_state_3_bw = lstm_cell_3_bw.zero_state(batch_size, dtype=tf.float32)
-        outputs_l3_bw, _ = tf.nn.dynamic_rnn(lstm_cell_3_bw, inputs=tf.reverse(outputs_l2,[1]), initial_state=init_state_3_bw, time_major=False, scope=lstm_cell3_bw)    
-    #output:
-    outputs_l3_bw = tf.reverse(outputs_l3_bw,[1])
-    outputs_l3 = tf.concat([outputs_l3_fw,outputs_l3_bw],2)
-    tf.summary.histogram('lstm3_outputs', outputs_l3)
+def lstm_model(batch_size, timestep_size, input_size):
 
+    input_layer = Input(name='the_input', shape=(timestep_size, input_size), batch_size=batch_size)
+    lstm_cell_1_fw = LSTMCell(units=hidden_size_1, unit_forget_bias=1.0, dropout=0, recurrent_dropout=keep_prob, activation="noisy_af")
+    # lstm_cell_1_fw = tf.nn.RNNCellDropoutWrapper(cell=lstm_cell_1_fw, input_keep_prob=1.0, output_keep_prob=keep_prob)
+    lstm_cell_1_fw.get_initial_state(tf.zeros(shape=(batch_size, timestep_size, input_size)), batch_size, dtype=tf.float32)
+    outputs_l1_fw = RNN(lstm_cell_1_fw, return_sequences=True, time_major=False)
+
+    lstm_cell_1_bw = LSTMCell(units=hidden_size_1, unit_forget_bias=1.0, dropout=0, recurrent_dropout=keep_prob, activation="noisy_af")
+    # lstm_cell_1_bw = tf.nn.RNNCellDropoutWrapper(cell=lstm_cell_1_bw, input_keep_prob=1.0, output_keep_prob=keep_prob)
+    lstm_cell_1_bw.get_initial_state(tf.zeros(shape=(batch_size, timestep_size, input_size)), batch_size, dtype=tf.float32)
+    outputs_l1_bw = RNN(lstm_cell_1_bw, go_backwards=True, return_sequences=True, time_major=False)
+
+    outputs_l1 = Bidirectional(outputs_l1_fw, backward_layer=outputs_l1_bw, merge_mode="concat")(input_layer)
+
+    #forward:
+    lstm_cell_2_fw = LSTMCell(units=hidden_size_2, unit_forget_bias=1.0, dropout=0, recurrent_dropout=keep_prob, activation="noisy_af")
+    # lstm_cell_2_fw = tf.nn.RNNCellDropoutWrapper(cell=lstm_cell_2_fw, input_keep_prob=1.0, output_keep_prob=keep_prob)
+    lstm_cell_2_fw.get_initial_state(tf.zeros(shape=(batch_size, timestep_size, hidden_size_2)), batch_size, dtype=tf.float32)
+    outputs_l2_fw = RNN(lstm_cell_2_fw, return_sequences=True,time_major=False)
+    #backward:
+    lstm_cell_2_bw = LSTMCell(units=hidden_size_2, unit_forget_bias=1.0, dropout=0, recurrent_dropout=keep_prob, activation="noisy_af")
+    # lstm_cell_2_bw = tf.nn.RNNCellDropoutWrapper(cell=lstm_cell_2_bw, input_keep_prob=1.0, output_keep_prob=keep_prob)
+    lstm_cell_2_bw.get_initial_state(tf.zeros(shape=(batch_size, timestep_size, hidden_size_2)), batch_size, dtype=tf.float32)
+    outputs_l2_bw = RNN(lstm_cell_2_bw, return_sequences=True, go_backwards=True, time_major=False)
+
+    #output:
+    outputs_l2 = Bidirectional(outputs_l2_fw, backward_layer=outputs_l2_bw, merge_mode="concat")(outputs_l1)
+
+    #forward:
+    lstm_cell_3_fw = LSTMCell(units=hidden_size_3, unit_forget_bias=1.0)
+    lstm_cell_3_fw.get_initial_state(tf.zeros(shape=(batch_size, timestep_size, hidden_size_3)), batch_size, dtype=tf.float32)
+    outputs_l3_fw = RNN(lstm_cell_3_fw, return_sequences=True, time_major=False)
+    #backward:
+    lstm_cell_3_bw = LSTMCell(units=hidden_size_3, unit_forget_bias=1.0)
+    lstm_cell_3_bw.get_initial_state(tf.zeros(shape=(batch_size, timestep_size, hidden_size_3)), batch_size, dtype=tf.float32)
+    outputs_l3_bw = RNN(lstm_cell_3_bw, go_backwards=True, return_sequences=True, time_major=False)
+    #output:
+    outputs_l3 = Bidirectional(outputs_l3_fw, backward_layer=outputs_l3_bw, merge_mode="concat")(outputs_l2)
     outputs = outputs_l3
     hidden_size = hidden_size_3*2
+
+    y_pre = Maxout(input_shape=outputs.shape)(outputs)#Maxout_layer(num_units=input_size, axis=2)(outputs)#
+    y_final = y_pre + Xtrac
+    y_delta = y_final[:, 1:, :] - y_final[:, :-1, :]
+
+    model = tf.keras.Model(inputs=input_layer, outputs=[y_final, y_delta])
+    print(model.summary())
+    return model
+
     
     #网络参数提取
-    lstm_variables = tf.get_collection(tf.GraphKeys.VARIABLES, scope=lstm_net.name)
+    # lstm_variables = tf.get_collection(tf.GraphKeys.VARIABLES, scope=lstm_net.name)
 
-#输出层的定义------------------------------------------------------------------
-with tf.name_scope('output_layer'):
-    #maxout层
-    maxout_w = tf.Variable(tf.truncated_normal([hidden_size, timestep_size, hidden_size], stddev=0.1), dtype=tf.float32, name='maxout_w')
-    tf.add_to_collection('losses', tf.contrib.layers.l2_regularizer(lambda1)(maxout_w))
-    tf.summary.histogram('maxout_w', maxout_w)
-    maxout_b = tf.Variable(tf.constant(0.1,shape=[timestep_size, hidden_size]), dtype=tf.float32, name='maxout_b')
-    tf.summary.histogram('maxout_b', maxout_b)
-    T_o = tf.transpose(outputs,[1,0,2])
-    T_w = tf.transpose(maxout_w,[1,0,2])
-    maxout_o = tf.transpose(tf.matmul(T_o, T_w),[1,0,2]) + maxout_b
-    mo_f = MO(maxout_o, maxout_size, axis=2)   #maxout
-    #输出层
-    W = tf.Variable(tf.truncated_normal([maxout_size, timestep_size, output_size], stddev=0.1), dtype=tf.float32, name='output_w')
-    tf.add_to_collection('losses', tf.contrib.layers.l2_regularizer(lambda1)(W))
-    tf.summary.histogram('output_w', W)
-    bias = tf.Variable(tf.constant(0.1,shape=[timestep_size, output_size]), dtype=tf.float32, name='output_b')
-    tf.summary.histogram('output_b',bias)
-    #tensroflow的三维tensor相乘，第一维不管，后面两维相乘，所以这里把timestep_size先放到第一维
-    tran_o = tf.transpose(mo_f,[1,0,2])
-    tran_w = tf.transpose(W,[1,0,2])
-    y_pre = tf.transpose(tf.matmul(tran_o, tran_w),[1,0,2]) + bias
-
-    lstm_outputs={'maxout_w':maxout_w, 'maxout_b':maxout_b, 'output_w':W,'output_b':bias}  #把要保存的参数做成字典
-    
-    y_final = y_pre + Xtrac
-    y_deta = y_final[:,1:,:] - y_final[:,:-1,:]
     
 # Set CPU/GPF mode
 #------------------------------------------------------------------------------
-#sess = tf.Session()  #CPU
-config = tf.ConfigProto()
-config.gpu_options.allow_growth = True
-#config.gpu_options.per_process_gpu_memory_fraction=0.9
-sess = tf.Session(config=config)
 
-sess.run(tf.global_variables_initializer())
 #==============================================================================
 #模型加载
-saver = tf.train.Saver()
-model_path = "/home/ljx/文档/OpenSources/DeepMTT/Models/LMTT.ckpt"
-load_path = saver.restore(sess, model_path)
-print ("Model restored from file: %s" % model_path)
-
-
-#==============================================================================
-#2--------Trajectory setting
-#==============================================================================
-#==============================================================================
+model = lstm_model(batch_size, timestep_size, input_size)
+# model_path = "/home/ljx/文档/OpenSources/DeepMTT/Models/LMTT.ckpt"
+# load_path = saver.restore(sess, model_path)
+# print ("Model restored from file: %s" % model_path)
+#
+#
+# #==============================================================================
+# #2--------Trajectory setting
+# #==============================================================================
+# #==============================================================================
 #==============================================================================
 from numpy.linalg import cholesky
 from filterpy.kalman import UnscentedKalmanFilter as UKF
@@ -237,142 +266,142 @@ def trajectory_creat(data_len, T_matrix, X_a):
         X_a = np.dot(X_a, T_matrix)
     data_n = data + np.dot(np.random.randn(data_len, 4), chol_var)  #加噪声
     return data, data_n
-
-#跟踪航迹建模, Parameter setting
-##T1-----------------
-#d_x = -18000   #目标x方位
-#d_y = 2000   #目标y方位
-#v_x = 150     #目标x方向速度
-#v_y = 200    #目标x方向速度
 #
-#n1=300
-#F1 = F_cv
-#n2=400
-#w1 = 9.18*np.pi/180
-#F2 = F_ct(w1)
-#n3=300
-#w2 = -3.54*np.pi/180
-#F3 = F_ct(w2)
-
-##T2-----------------
-#d_x = -7000   #目标x方位
-#d_y = -24000   #目标y方位
-#v_x = 280     #目标x方向速度
-#v_y = 320    #目标x方向速度
+# #跟踪航迹建模, Parameter setting
+# ##T1-----------------
+# #d_x = -18000   #目标x方位
+# #d_y = 2000   #目标y方位
+# #v_x = 150     #目标x方向速度
+# #v_y = 200    #目标x方向速度
+# #
+# #n1=300
+# #F1 = F_cv
+# #n2=400
+# #w1 = 9.18*np.pi/180
+# #F2 = F_ct(w1)
+# #n3=300
+# #w2 = -3.54*np.pi/180
+# #F3 = F_ct(w2)
 #
-#n1=400
-#w1 = -2.08*np.pi/180
-#F1 = F_ct(w1)
-#n2=200
-#F2 = F_cv
-#n3=400
-#w2 = 5.34*np.pi/180
-#F3 = F_ct(w2)
-
-#T3-----------------
-#d_x = 12000   #目标x方位
-#d_y = 13000   #目标y方位
-#v_x = 230     #目标x方向速度
-#v_y = 190    #目标x方向速度
-
-#n1=300
-#F1 = F_cv
-#n2=400
-#w1 = -7.16*np.pi/180
-#F2 = F_ct(w1)
-#n3=300
-#w2 = 4.24*np.pi/180
-#F3 = F_ct(w2)
-    
-##T4-----------------
-#d_x = 5000   #目标x方位
-#d_y = -5000   #目标y方位
-#v_x = 10     #目标x方向速度
-#v_y = 330    #目标x方向速度
+# ##T2-----------------
+# #d_x = -7000   #目标x方位
+# #d_y = -24000   #目标y方位
+# #v_x = 280     #目标x方向速度
+# #v_y = 320    #目标x方向速度
+# #
+# #n1=400
+# #w1 = -2.08*np.pi/180
+# #F1 = F_ct(w1)
+# #n2=200
+# #F2 = F_cv
+# #n3=400
+# #w2 = 5.34*np.pi/180
+# #F3 = F_ct(w2)
 #
-#n1 = 200
-#F1 = F_cv
-#n2 = 600
-#w2 = 3.26*np.pi/180
-#F2 = F_ct(w2)
-#n3 = 200
-#F3 = F_cv
-
-##T5-----------------
-#d_x = 25000   #目标x方位
-#d_y = -6000   #目标y方位
-#v_x = 120     #目标x方向速度
-#v_y = 230    #目标x方向速度
+# #T3-----------------
+# #d_x = 12000   #目标x方位
+# #d_y = 13000   #目标y方位
+# #v_x = 230     #目标x方向速度
+# #v_y = 190    #目标x方向速度
 #
-#n1 = 220
-#F1 = F_cv
-#n2 = 560
-#w2 = 7.16*np.pi/180
-#F2 = F_ct(w2)
-#n3 = 220
-#F3 = F_cv
-
-##T6-----------------
-#d_x = 20000   #目标x方位
-#d_y = -20000   #目标y方位
-#v_x = -220     #目标x方向速度
-#v_y = -200    #目标x方向速度
+# #n1=300
+# #F1 = F_cv
+# #n2=400
+# #w1 = -7.16*np.pi/180
+# #F2 = F_ct(w1)
+# #n3=300
+# #w2 = 4.24*np.pi/180
+# #F3 = F_ct(w2)
 #
-#n1 = 600
-#w1 = -0.58*np.pi/180
-#F1 = F_ct(w1)
-#n2 = 100
-#F2 = F_cv
-#n3 = 300
-#w3 = -2.21*np.pi/180
-#F3 = F_ct(w3)
-    
-##T7-----------------
-#d_x = -15000   #目标x方位
-#d_y = -25000   #目标y方位
-#v_x = 100     #目标x方向速度
-#v_y = 280    #目标x方向速度
+# ##T4-----------------
+# #d_x = 5000   #目标x方位
+# #d_y = -5000   #目标y方位
+# #v_x = 10     #目标x方向速度
+# #v_y = 330    #目标x方向速度
+# #
+# #n1 = 200
+# #F1 = F_cv
+# #n2 = 600
+# #w2 = 3.26*np.pi/180
+# #F2 = F_ct(w2)
+# #n3 = 200
+# #F3 = F_cv
 #
-#n1 = 600
-#w1 = 0.17*np.pi/180
-#F1 = F_ct(w1)
-#n2 = 300
-#F2 = F_cv
-#n3 = 100
-#w3 = -9.19*np.pi/180
-#F3 = F_ct(w3)
-
-##T8-----------------
-#d_x = -25000   #目标x方位
-#d_y = -15000   #目标y方位
-#v_x = -120     #目标x方向速度
-#v_y = 200    #目标x方向速度
+# ##T5-----------------
+# #d_x = 25000   #目标x方位
+# #d_y = -6000   #目标y方位
+# #v_x = 120     #目标x方向速度
+# #v_y = 230    #目标x方向速度
+# #
+# #n1 = 220
+# #F1 = F_cv
+# #n2 = 560
+# #w2 = 7.16*np.pi/180
+# #F2 = F_ct(w2)
+# #n3 = 220
+# #F3 = F_cv
 #
-#n1 = 300
-#w1 = -6.18*np.pi/180
-#F1 = F_ct(w1)
-#n2 = 500
-#w2 = 8.33*np.pi/180
-#F2 = F_ct(w2)
-#n3 = 200
-#w3 = -2.21*np.pi/180
-#F3 = F_ct(w3)
-    
-##T9-----------------
-#d_x = -30000   #目标x方位
-#d_y = -5000   #目标y方位
-#v_x = 250     #目标x方向速度
-#v_y = 180    #目标x方向速度
+# ##T6-----------------
+# #d_x = 20000   #目标x方位
+# #d_y = -20000   #目标y方位
+# #v_x = -220     #目标x方向速度
+# #v_y = -200    #目标x方向速度
+# #
+# #n1 = 600
+# #w1 = -0.58*np.pi/180
+# #F1 = F_ct(w1)
+# #n2 = 100
+# #F2 = F_cv
+# #n3 = 300
+# #w3 = -2.21*np.pi/180
+# #F3 = F_ct(w3)
 #
-#n1 = 550
-#w1 = -1.15*np.pi/180
-#F1 = F_ct(w1)
-#n2 = 150
-#w2 = 9.13*np.pi/180
-#F2 = F_ct(w2)
-#n3 = 300
-#F3 = F_cv
-    
+# ##T7-----------------
+# #d_x = -15000   #目标x方位
+# #d_y = -25000   #目标y方位
+# #v_x = 100     #目标x方向速度
+# #v_y = 280    #目标x方向速度
+# #
+# #n1 = 600
+# #w1 = 0.17*np.pi/180
+# #F1 = F_ct(w1)
+# #n2 = 300
+# #F2 = F_cv
+# #n3 = 100
+# #w3 = -9.19*np.pi/180
+# #F3 = F_ct(w3)
+#
+# ##T8-----------------
+# #d_x = -25000   #目标x方位
+# #d_y = -15000   #目标y方位
+# #v_x = -120     #目标x方向速度
+# #v_y = 200    #目标x方向速度
+# #
+# #n1 = 300
+# #w1 = -6.18*np.pi/180
+# #F1 = F_ct(w1)
+# #n2 = 500
+# #w2 = 8.33*np.pi/180
+# #F2 = F_ct(w2)
+# #n3 = 200
+# #w3 = -2.21*np.pi/180
+# #F3 = F_ct(w3)
+#
+# ##T9-----------------
+# #d_x = -30000   #目标x方位
+# #d_y = -5000   #目标y方位
+# #v_x = 250     #目标x方向速度
+# #v_y = 180    #目标x方向速度
+# #
+# #n1 = 550
+# #w1 = -1.15*np.pi/180
+# #F1 = F_ct(w1)
+# #n2 = 150
+# #w2 = 9.13*np.pi/180
+# #F2 = F_ct(w2)
+# #n3 = 300
+# #F3 = F_cv
+#
 #T0-----------------
 d_x = -10000   #目标x方位
 d_y = 25000   #目标y方位
@@ -441,7 +470,7 @@ def UKF_tracking(x0, Obser):
     for i in range(data_len-1):
         my_UKF.predict()
         my_UKF.update(Obser[i+1,:])
-        xs.append(my_UKF.x.copy())    
+        xs.append(my_UKF.x.copy())
     return np.asarray(xs)
 #把航迹封装成batch
 def batch(batch_size, x0, Obser):
@@ -469,24 +498,24 @@ for ii in range(MC_number):
     while flag == 1:
         try:
             x0_noise = np.array([np.random.normal(0,pos_noise,2),np.random.normal(0,vel_noise,2)])
-            org_tj1, dtn1 = trajectory_creat(n1, F1, x0+np.reshape(x0_noise,[4,])) 
+            org_tj1, dtn1 = trajectory_creat(n1, F1, x0+np.reshape(x0_noise,[4,]))
             org_tj2, dtn2 = trajectory_creat(n2, F2, org_tj1[-1,:])
             org_tj3, dtn3 = trajectory_creat(n3, F3, org_tj2[-1,:])
             org_tj = np.vstack((org_tj1,org_tj2,org_tj3))
             dtn = np.vstack((dtn1,dtn2,dtn3))
             org_tj_all[ii,:,:]=org_tj
-            
+
             #我的观测
             observation = np.array([[0 for i in range(2)] for j in range(num_trajectory)],'float64')
             observation[:,0] = np.arctan2(dtn[:,1],dtn[:,0]) + np.random.normal(0,azi_var,num_trajectory) #方位角
             observation[:,1] = np.sqrt(np.square(dtn[:,0])+np.square(dtn[:,1])) + np.random.normal(0,dis_var,num_trajectory)   #距离
             observation_all[ii,:,:]=observation
-            
+
             #设计一个迭代的间隔
             deta_iter = 10
             #LSTM网络输出的次数
             iter_num = int(num_trajectory / deta_iter)
-            
+
             #通过lstm网络修正跟踪结果
             xs=[]
             b_p = 0
@@ -497,7 +526,7 @@ for ii in range(MC_number):
             for i in range(iter_num-4):
 #                if is_clac_t == 1:
 #                    start_t = time.clock()
-                
+
                 xi = xb
                 obser_seg = observation[b_p:b_p+timestep_size,:]
                 Traj_s = batch(bs, xi, obser_seg)
@@ -513,14 +542,14 @@ for ii in range(MC_number):
                     Traj_ult = Traj_c
                     Traj_ult[:,0:timestep_size-deta_iter,:] = 0.5*(Traj_ult[:,0:timestep_size-deta_iter,:]+Traj_pre[:,deta_iter:,:])
                     Traj_pre = Traj_ult
-                xb = Traj_ult[0,deta_iter,:]         
-                xs.append(Traj_ult[0,0:deta_iter,:])            
+                xb = Traj_ult[0,deta_iter,:]
+                xs.append(Traj_ult[0,0:deta_iter,:])
 #                print ("step %d has been calculated"% i)
-                
+
 #                if is_clac_t == 1:
 #                    end_t = time.clock()
 #                    is_clac_t = 0
-            end_t = time.clock()    
+            end_t = time.clock()
             xs_a = np.asarray(xs)
             xs_b = np.reshape(xs_a,[960,4])
             dmtt_tr_all[ii,:,:] = np.vstack((xs_b,Traj_ult[0,deta_iter:,:]))
